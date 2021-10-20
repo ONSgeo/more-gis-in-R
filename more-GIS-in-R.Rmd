@@ -1,0 +1,654 @@
+---
+title: "More GIS in R"
+date: "September 2021"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '2'
+    df_print: paged
+  html_notebook:
+    number_sections: yes
+    theme: flatly
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+---
+
+```{r, echo=FALSE}
+htmltools::img(src = knitr::image_uri("data/img/small geo icon.png"), 
+               alt = 'logo', 
+               style = 'position:absolute; top:50px; right:0; padding:10px;')
+```
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(fig.align="center")
+```
+
+```{r libraries, message=FALSE, warning=FALSE, echo=FALSE}
+library("sf")
+library("dplyr")
+library("readr")
+library("stringr")
+library("tmap")
+library("knitr")
+library("janitor")
+library("arcpullr")
+library("purrr")
+```
+
+# Introduction 
+This exercise is designed to follow on from our [Introduction to GIS in R course](https://github.com/ONSgeo/Introduction_to_GIS_in_R). We will use both the data from the previous course and some new sources in this walkthrough. 
+
+
+## Aims
+The aim for this course is to build confidence in using some of the basic spatial analysis tools and develop geospatial thinking - the way of thinking about spatial problems, which often involves chaining a number of simple tools together, to effectively answer questions about _where_.  
+
+**By the end of the course you will:**
+ 
+* be comfortable using simple geospatial operations like buffers, intersections etc.
+* be able to provide summary statistics for areas
+* understand more about joins, and what happens when they go wrong
+* understand about network analysis and how it can improve the accuracy of some analyses
+* be more comfortable troubleshooting some common error messages
+* complete a piece of spatial analysis and be able to present it
+
+
+# Getting Started
+## Set up
+
+* In RStudio go to File -> New Project -> Existing Directory -> Downloaded Github repository.
+* Run `getwd()` - the file path should end in "more-gis-in-R".
+* Open a new script: File -> New File -> R Script - this is where you will write your R code.
+* Use the top right `Code` dropdown to hide/reveal solutions to exercises. 
+
+## Working directory structure
+
+It's a good habit to keep your working directory in order.
+
+In this exercise we'll be using the following structure in our project directory:
+
+* data
+  * csv
+  * img
+  * shp
+* output
+  * maps
+  
+If you don't already have this set up, take some time to do it now.
+
+
+## Install & load R libraries
+
+As with every R project, make sure you have all required packages installed and loaded into your workspace.
+
+```{r eval=FALSE}
+install.packages("sf")
+install.packages("tmap")
+install.packages("dplyr")
+install.packages("readr")
+install.packages("stringr")
+install.packages("janitor")
+install.packages("arcpullr")
+install.packages("purrr")
+
+library(sf) 
+library(tmap)
+library(dplyr)
+library(readr)
+library(stringr)
+library(janitor)
+library(arcpullr)
+library(purrr)
+```
+
+
+## Data Sources
+
+As well as the data from Introduction to GIS in R we will be using a few new data sources during this work:
+
+* [Ordnance Survey Open Greenspace](https://www.ordnancesurvey.co.uk/business-government/products/open-map-greenspace)
+* A geopackage of London fire station locations (provided in the repo)
+* a csv of missing pet reports (a toy dataset provided in the repo)
+
+We have also provided you with a geopackage of the data and layers that were created in 'Introduction to GIS in R' which may be useful in this walkthrough too - it's called *intro_to_gis_files.gpkg*. 
+
+
+## Analysis Questions and Aims
+During this analysis we'll aim to answer the following questions:
+
+*	How is greenspace distributed in each UTLA in London?
+* How many animals are rescued in each London greenspace?
+*	Is the fire station coverage in the area adequate to rescue all animals?
+* If not, how far away from the area covered by fire stations is each lost pet?
+*	Produce maps and data to produce a mini analysis notebook/report/presentation showing the results of your analysis.
+
+
+# Analysis
+
+## Preparing OS Open Greenspace
+As a first step we need to download the greenspace data for our analysis. 
+
+Download tiles TQ and TL from the [Ordnance Survey Open Greenspace dataset](https://osdatahub.os.uk/downloads/open/OpenGreenspace?_ga=2.76356949.1574366512.1629803242-2038235350.1629803242) as a shapefile, unzip them and move them into the data/shp folder in your working directory. Later in the course you'll find out how to access this data via API!
+
+**Tip**: Don't forget that one shapefile requires 3 consituent files to be valid (shp, shx, dbf), and may have other associated files too. [Wikipedia](https://en.wikipedia.org/wiki/Shapefile) has a comprehensive list of all potential extensions. Make sure all files have the same name and are stored in the same place otherwise your shapefile won't work!
+
+We now need to load the two shapefiles in and merge them into one feature for subsequent analysis. 
+
+You already know how to load in shapefiles so go ahead and do that.
+
+
+```{r}
+TL <- st_read("data/shp/OS Open Greenspace (ESRI Shape File) TL/data/TL_GreenspaceSite.shp")
+TQ <- st_read("data/shp/OS Open Greenspace (ESRI Shape File) TQ/data/TQ_GreenspaceSite.shp")
+```
+
+Now let's make a quick plot to see what we just loaded in.
+
+```{r echo=TRUE}
+qtm(TL)
+```
+
+When we inspect the head we can see that there are 6 fields in this datset. Note that one field is the geometry field, which is where the spatial aspect of each object is stored. The 'function' column might be useful in our analysis later.
+
+```{r echo=TRUE}
+head(TL)
+```
+
+You might have noticed that the geometry type is multipolygon, which is something we haven't come across yet. A multipoloygon is an object (row) in the dataset which can be comprised of a number of distinct polygons. Here's an example:
+
+```{r echo=TRUE}
+#in this code we combine the dplyr filter function with qtm to plot one feature from the TL dataset
+qtm(filter(TL, id == "B9FB5B52-EB5B-5E80-E053-A03BA40A915F"))
+```
+
+Now we've had a quick look at our data we need to get it ready for analysis. We will merge the two greenspace tiles into one object in our R workspace so we can work with it more later. 
+
+You have likely seen a verison of the Venn diagrams below in the context of joining data. In this context, they show methods for working with poygon geometries. Looking at this diagram you might think that ```st_union()``` is what we want to join our two greenspace tiles together, but it's not! ```st_union()``` dissolves all the polygons in the layers into one huge multipart polygon. We want to keep our distinct greenspace polygons so we'll go down a different route instead. However, keep the diagram below in mind because it can be very useful and you'll stumble across it later too.
+
+![Examples of geometrical operations](images/venn-clip-1.png) 
+*Image from [Geocomputation with R](https://geocompr.robinlovelace.net/index.html)*
+
+As each multipart polygon in our dataset is represented as one row, joining the two datasets together is simple
+
+```{r}
+greenspace <- rbind(TL, TQ)
+
+```
+
+There are a couple of sanity checks you can do here to make sure that went well - check the number of objects add up properly (8760+19798 = 28558!) and by plot a quick tmap to check our map (we can clearly see London and part of the SE below).
+
+```{r}
+qtm(greenspace)
+```
+
+Now we'll crop our greenspace layer to the extent of London - this layer is one we prepared during 'Introduction to GIS in R' so bring it back in from your code or import it from the 'intro_to_gis_files.gpkg' file we've provided for you. If you've not come across a geopackage before don't worry - a geopackage is a SQLite file, essentially a mini database which can hold multiple layers (both spatial and tabular). 
+
+Use ```st_layers()``` to find out what layers are available in your geopackage.
+```{r}
+st_layers("data/intro_to_gis_files.gpkg")
+```
+
+
+```{r}
+london_boundary <- st_read("data/intro_to_gis_files.gpkg", layer = "UTLA_2019_London_dissolved")
+```
+
+
+```{r error=TRUE}
+greenspace_london <- st_intersection(greenspace, london_boundary)
+```
+
+Oh no! We have an error.
+
+This error says ```st_crs(x) == st_crs(y) is not TRUE``` - in other words, the coordinate reference system (CRS) of the two input layers is not the same. It's always good practice to check your coordinate reference systems are the same prior to undertaking spatial operations. You can check the CRS of a layer with ```st_crs()``` and you check two layers have the same CRS with ```st_crs(x) == st_crs(y)```.
+
+If you check the two layers we have now you'll find greenspace is provided in British National Grid (EPSG code: 27700) and london_boundary is in WGS84 (EPSG code: 4326). You'll come across these two CRSs very commonly in UK focused work.
+
+To get rid of the error message you'll need to transform one of your layers so it's in the same CRS as the other. However, which one should you transform? Well, if you remember back to [Practical Geography for Statistics](https://onsgeo.github.io/geospatial-training/docs/practical_geog_and_stats#locating-spatial-data), we said that that WGS84 is a geographic coordinate reference system (which means it represents positions on the 3D Earth using longitude and latitude) whereas British National Grid is a projected coordinate reference system (which represents positions as if they were presented on a flat map using meters). Doing spatial operations is more simple and accurate on projected coordinate reference systems so in this instance we'll transform the WGS84 layer to British National Grid. 
+
+It's worth noting here that all CRS transformations come with some degree of error so try to avoid unnecessary transformations, and if you're using an unfamiliar CRS take a look into the accuracy of the transformation so that you understand the potential positional error you are introducing into your analysis.
+
+So, transform london_boundary into British National Grid.
+
+```{r echo=TRUE}
+london_boundary <- st_transform(london_boundary, 27700)
+```
+
+You see that in ```st_transform``` we have used EPSG codes as the ```crs``` argument. You might also see examples around which use a PROJ.4 string - for example: ```+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +datum=OSGB36 +units=m +no_defs``` - but using these is discouraged as they are being phased out in favour of WKT2 strings. You can read more about this here: [Goodbye PROJ.4!](https://inbo.github.io/tutorials/tutorials/spatial_crs_coding/) if you're interested... or just take our word for it!
+
+```{r}
+st_crs(greenspace) == st_crs(london_boundary)
+```
+Now our layers are in the same CRS!
+
+```{r}
+greenspace_london <- st_intersection(greenspace, london_boundary)
+```
+
+Now you can see your greenspace layer has been clipped to the London boundary. We're ready to get on with some analysis.
+
+```{r}
+qtm(greenspace_london)
+```
+
+
+## Calculating the Area of Greenspaces
+Before we calculate the area of each greenspace polygon we need to intersect the greenspace layer with the UTLA boundaries, so we divide greenspace polygons where they cross UTLA boundaries. 
+
+We've already covered how to do this so see if you can:
+
+* load in the Upper Tier Local Authority boundaries (UTLAs) from intro_to_gis_files.gpkg
+* check the CRS and transform it if necessary
+* intersect the greenspace and UTLA layers
+
+```{r}
+utla <- st_read("data/intro_to_gis_files.gpkg", layer = "UTLA_2019_London")
+```
+
+```{r}
+st_crs(utla)
+```
+
+```{r}
+utla <- st_transform(utla, 27700)
+```
+
+```{r}
+greenspace_utla_intersection <- st_intersection(utla, greenspace)
+
+```
+
+If you take a glimpse at the intersection output you'll see that for each greenspace polygon, there are now attributes about the UTLA it falls within - we've done a spatial join here. We've also split greenspace polygons which cover more than one UTLA along the UTLA boundary.
+
+```{r}
+glimpse(greenspace_utla_intersection)
+```
+
+We will shortly calculate summary statistics about greenspace distribution across London. Before we do that you'll notice we don't have any attributes for area; we can calculate them using ```st_area()```. One thing to be aware of with ```st_area()``` is that the areas calculated come with units - they are based on the units of the CRS of the layer - so for British National Grid they come in m^2. You can convert them into other units using ```units::set_units``` and drop these units using ```as.numeric```.
+
+```{r}
+greenspace_utla_intersection$greenspace_area_ha <- as.numeric(units::set_units(st_area(greenspace_utla_intersection), ha))
+```
+
+## Calculate Greenspace Summary Statistics by Local Authority
+
+We're now going to produce some summary stats:
+
+* total area of greenspace per UTLA
+* number of greenspace areas per UTLA
+
+We can use ```dplyr``` tools to calculate these statistics, so you should be comfortable with these operations.
+
+However, before we start, it's important that we drop the geometry from the data frame using ```st_drop_geometry()``` which allows us to stop using the spatial aspects of this data frame and work with it like a normal, non-spatial data frame.
+
+```{r}
+utla_greenspace_stats <- greenspace_utla_intersection %>% 
+                          st_drop_geometry() %>% 
+                          group_by(ctyua19cd, ctyua19nm) %>% 
+                          summarise(total_greenspace_ha = sum(greenspace_area_ha),
+                                    number_of_greenspaces = n())
+```
+### Exercise
+See if you can calculate how many pet rescue incidents happened in each greenspace by using your knowledge of dplyr and the spatial operations you've seen so far. How about plotting a map to illustrate them? If you finish quickly, try out some other summary statistics that might be useful for your report.
+
+
+## Missing Pet Reports
+
+Now we're going to take a look at some missing pet reports (a reminder this is a toy dataset). Load it in and take a look through the data. While you're looking, think about what makes this data spatial data, what you'll need to do to it to make it more useful, and how you might make use of this data.
+
+```{r echo=TRUE}
+lost_pets <- read_csv("data/csv/lost_pet_reports.csv")
+```
+
+```{r}
+head(lost_pets)
+```
+
+So, let's think about this data:
+
+* it's got coordinates which means we know the position of each individual point - this is the spatial aspect
+* we also have a statistical geography code (ctyua19cd) which is another piece of spatial information
+* there's no metadata so we're not sure what CRS the coordinates are in. However, the numbers are within the normal range of British National Grid and given this is data for London it seems a sensible choice. So, we'll try it out and see whether it plots in the right place by verifying this against other location data we have (like the ctyua19nm column).
+* to make this data a useful format we'll need to convert the easting and northings into point geometries
+* there are no NAs within the dataset
+* and we'll take a look at some ideas for analysing this data later on!
+
+
+Before we dive into some analysis let's quickly make some summary stats which we can use to understand our data a bit more, and also to use in our report later. For each area, we'll find the count of each animal type and calculate this as a percentage of total lost animals.
+
+```{r}
+lost_pets_stats <- lost_pets %>% 
+                      group_by(ctyua19cd, animal) %>% 
+                      summarise(count_lost_pets = n())
+```
+```{r}
+lost_pets_counts <- lost_pets %>% 
+                      group_by(ctyua19cd) %>% 
+                      summarise(total_pets = n())
+```
+
+
+```{r}
+lost_pets_stats <- left_join(lost_pets_stats, lost_pets_counts, by = "ctyua19cd")
+```
+
+
+```{r}
+lost_pets_stats <- mutate(lost_pets_stats, lost_pets_pct = (count_lost_pets/total_pets)*100)
+```
+
+
+Now let's join the dogs to the UTLA boundaries and plot a map.
+
+```{r}
+utla_lost_pet_stats <- left_join(utla, filter(lost_pets_stats, animal == "dog"), by = "ctyua19cd")
+```
+
+Take a look at the data - did everything join successfully?
+
+```{r echo=FALSE}
+filter(utla_lost_pet_stats, ctyua19cd == "E09000002")
+```
+Hmm... we have animals in Barking and Dagenham in our summary stats so why haven't they joined? Take a look at the data and see if you can spot it.
+```{r}
+join_test <- anti_join(utla, filter(lost_pets_stats, animal == "dog"), by = "ctyua19cd")
+```
+
+
+```{r echo=FALSE}
+head(join_test)
+```
+
+Using ```dplyr::anti_join()``` can be a good way to test to see which rows haven't joined. In this case we have 2 rows which haven't joined. We don't expect a join for City of London because there were no lost dogs reported there. However, there should have been a join with Barking and Dagenham. 
+
+If we take a look at E09000002 (the code for Barking and Dagenham) in lost_pet_stats we'll see there are no results.
+
+```{r echo=TRUE}
+head(filter(lost_pets_stats, ctyua19cd == "E09000002"))
+```
+That is because, if you take a look you'll see there's an incorrect code - "E09000042". You can search the code on the [ONS Linked Data Portal](http://statistics.data.gov.uk/home) to see that it doesn't correspond to a geography. With some more investigation (eg. plotting maps) you can draw the conclusion that this UTLA has been incorrectly labeled. So, we'll correct it and rerun our previous code.
+
+```{r}
+lost_pets$ctyua19cd <- gsub("E09000042", "E09000002", lost_pets$ctyua19cd)
+```
+
+```{r include=FALSE}
+lost_pets_stats <- lost_pets %>% 
+                      group_by(ctyua19cd, animal) %>% 
+                      summarise(count_lost_pets = n())
+                       
+lost_pets_counts <- lost_pets %>% 
+                      group_by(ctyua19cd) %>% 
+                      summarise(total_pets = n())
+
+lost_pets_stats <- left_join(lost_pets_stats, lost_pets_counts, by = "ctyua19cd")
+
+lost_pets_stats <- mutate(lost_pets_stats, lost_pets_pct = (count_lost_pets/total_pets)*100)
+
+utla_lost_pet_stats <- left_join(utla, filter(lost_pets_stats, animal == "dog"), by = "ctyua19cd")
+
+```
+Now we can plot our map. Here's an example:
+
+
+```{r eval=FALSE}
+lost_dogs_map <- tm_shape(utla_lost_pet_stats) + 
+  tm_polygons(col = "lost_pets_pct",  breaks = seq(0,100,20), title = "Lost dog reports (%)",
+              labels = c("  0 - 20", ">20 - 40", ">40 - 60", "<60 - 80", "<80 - 100"), palette = "Blues", contrast = 1) + 
+  tm_shape(london_boundary) + tm_borders(col = "black", lwd = 2) +
+  tm_scale_bar(position = c(0,0)) +
+   tm_layout(title = "Lost dogs reported in London, percent of total reports",  
+            frame = FALSE, inner.margins = c(0.1,0.1,0.1,0.15))
+```
+
+```{r echo=FALSE}
+lost_dogs_map <- tm_shape(utla_lost_pet_stats) + 
+  tm_polygons(col = "lost_pets_pct",  breaks = seq(0,100,20), title = "Lost dog reports (%)",
+              labels = c("  0 - 20", ">20 - 40", ">40 - 60", "<60 - 80", "<80 - 100"), palette = "Blues", contrast = 1) + 
+  tm_shape(london_boundary) + tm_borders(col = "black", lwd = 2) +
+  tm_scale_bar(position = c(0,0)) +
+   tm_layout(title = "Lost dogs reported in London, percent of total reports",  
+            frame = FALSE, inner.margins = c(0.1,0.1,0.1,0.15))
+lost_dogs_map
+```
+
+Now, let's convert our lost pets layer to an sf object ready for our next piece of analysis.
+
+```{r}
+lost_pets_sf <- st_as_sf(lost_pets, coords = c("easting", "northing"), crs = 27700)
+```
+
+
+### Exercise
+Investigate the data more and practice plotting maps using ```tmap```.
+
+
+## Fire Stations - data preparation
+Introducing our last dataset for this piece of work - the location of all London Fire Stations. We're going to use this data to understand how the London Fire Brigade cover incidents happening in the city.
+
+We have a csv list of fire stations - let's load it in and take a look.
+
+```{r}
+stations <- read_csv("data/csv/london_fire_brigade_stations.csv")
+```
+
+
+```{r echo=FALSE}
+head(stations)
+```
+
+So, it looks like we're going to have to do some work to get this in a useable state because:
+
+* there are no coordinates to turn this into a spatial object
+* there are no geography codes to join this to statistical boundaries
+* column names have spaces so we can't use them in R easily
+
+Let's start off with the last point first, because it's easiest to solve. You can use ```dplyr:rename()``` to change individual column names, but here we're going to use a useful package, ```janitor```, which has some handy data cleaning functions - [take a look at the documentation](https://cran.r-project.org/web/packages/janitor/vignettes/janitor.html) for more details.
+
+```{r}
+stations <- clean_names(stations)
+```
+
+```{r echo=FALSE}
+head(stations)
+```
+
+
+Now let's sort out the other two problems. Luckily, this data comes with an address, which we can use to get coordinates. Before we get on with our analysis it's worth mentioning a couple of things to be aware of:
+
+**Address Matching** It's possible to match an address to its coordinates using Ordnance Survey's AddressBase dataset. However, that can be tricky because it requires text matching on address strings, which can be surprisingly challenging (for example, the string "Flat 4a" would be very different from "Flat A, Floor 4" but could easily refer to the same property). We generally don't recommend going down this route without some serious experience in data linkage!
+
+**Unique Identifiers** The best way to join data is by using unique identifiers. Addressable locations have a unique identifier called UPRN (unique property reference number) which is increasingly used across a range of datasets. ONS also produce UPRN directories which link UPRNs to statistical geography codes for easy aggregation etc. We recommend using UPRN wherever possible.
+
+Back to the analysis... For this piece of work we'll use the postcode to get a location as it will be accurate enough for our analysis, and we don't have UPRN in this dataset.
+
+The first thing to do is pull the postcode out into a new column. There are lots of ways to do this so feel free to use a method you're comfortable with. We'll use ```sub()``` and select the string after the last comma in the address column.
+
+```{r}
+stations$postcode <- sub('.*\\, ', '', stations$address)
+```
+
+To deal with the other two problems we're going to use the [ONS Postcode Directory](https://geoportal.statistics.gov.uk/datasets/ons-postcode-directory-august-2021/about). You can download a copy and load it directly into R, but it's pretty large so we're going to speed things up by working with the API instead.
+
+First, we'll make a function which handles the API request for a single postcode...
+
+```{r}
+get_postcode_loc <- function(pcd){
+  get_spatial_layer(
+      url = "https://ons-inspire.esriuk.com/arcgis/rest/services/Postcodes/ONSPD_Centroids_Lite/MapServer/0",
+      where = paste0("pcds =","'",pcd,"'"),
+      out_fields = c("pcds", "itl"))
+}
+```
+
+we can use the function with ```purrr::map_df``` to iterate over all of the station postcodes and produce a spatial dataframe (sf object) containing the station postcodes, UTLA codes and X and Y coordinates 
+
+```{r}
+pcd <- stations$postcode
+```
+
+
+```{r}
+station_locations <- purrr::map_df(pcd, get_postcode_loc)
+```
+
+However, the file is in the wrong projection so we'll have to reproject it (from WGS84 to British National Grid).
+
+```{r}
+station_locations <- st_transform(station_locations, 27700)
+```
+
+Finally, we join the spatial dataframe with our attribute dataframe to create a useful file to work with.
+
+```{r}
+station_locations <- left_join(station_locations, stations, by = c("pcds" = "postcode"))
+```
+
+
+## Calculate Fire Station Coverage
+
+We want to investigate how many reports of lost pets are within 3km of the fire stations (this value is not based on a real life distance - it's purely illustrative). ```st_buffer``` calculates this area, you'll notice you have to put a distance in to buffer by - the units for this are always the units of the CRS - in this case meters.
+
+```{r}
+station_locations_3km_buffer <- st_buffer(station_locations, 3000)
+
+```
+
+And here's what we've produced
+
+
+```{r eval=FALSE}
+buffered_stations_map <- tm_shape(station_locations_3km_buffer) + 
+  tm_polygons() + 
+  tm_shape(london_boundary) + tm_borders(col = "black", lwd = 2) +
+  tm_scale_bar(position = c(0,0)) +
+   tm_layout(title = "Area served by London Fire Brigade's stations",  
+            frame = FALSE, inner.margins = c(0.1,0.1,0.1,0.15))
+```
+
+```{r echo=FALSE}
+buffered_stations_map <- tm_shape(station_locations_3km_buffer) + 
+  tm_polygons() + 
+  tm_shape(london_boundary) + tm_borders(col = "black", lwd = 2) +
+  tm_scale_bar(position = c(0,0)) +
+   tm_layout(title = "Area served by London Fire Brigade's stations",  
+            frame = FALSE, inner.margins = c(0.1,0.1,0.1,0.15))
+buffered_stations_map
+```
+
+For ease of analysis we're going to dissolve our polygons into one large polygon which represents the area served by the fire stations across London. 
+
+```{r}
+station_locations_3km_buffer_dissolve <- st_union(station_locations_3km_buffer)
+```
+
+And see how that differs from our previous layer...
+
+```{r eval=FALSE}
+buffered_dissolved_stations_map <- tm_shape(station_locations_3km_buffer_dissolve) + 
+  tm_polygons() + 
+  tm_shape(london_boundary) + tm_borders(col = "black", lwd = 2) +
+  tm_scale_bar(position = c(0,0)) +
+   tm_layout(title = "Area served by London Fire Brigade's stations",  
+            frame = FALSE, inner.margins = c(0.1,0.1,0.1,0.15))
+```
+
+
+```{r echo=FALSE}
+buffered_dissolved_stations_map <- tm_shape(station_locations_3km_buffer_dissolve) + 
+  tm_polygons() + 
+  tm_shape(london_boundary) + tm_borders(col = "black", lwd = 2) +
+  tm_scale_bar(position = c(0,0)) +
+   tm_layout(title = "Area served by London Fire Brigade's stations",  
+            frame = FALSE, inner.margins = c(0.1,0.1,0.1,0.15))
+
+buffered_dissolved_stations_map
+```
+
+Now let's see which lost pets are not within 3km of a fire station. 
+
+We'll use the ```st_intersects()``` family of functions for this - not to be confused with ```st_intersection()```! ```st_intersects()``` tests the spatial relationship between two layers. There are a number of types of spatial test within the ```st_intersects()``` family so take a look at ```?st_intersects``` for a full list - for example, you can test to see whether two objects touch, cross or overlap. 
+
+```{r}
+uncovered_lost_pets <- st_disjoint(lost_pets_sf, station_locations_3km_buffer_dissolve, sparse = FALSE)
+```
+
+Take a look at the output:
+
+```{r echo=FALSE}
+uncovered_lost_pets[1:10]
+```
+By using ```sparse = FALSE``` we return a logical vector (if the point is outside the buffer = TRUE, or within the buffere = FALSE) which can be used to filter our points of interest. We'll turn this back into an sf object at the same time.
+
+```{r}
+uncovered_lost_pets_sf <- st_as_sf(lost_pets[uncovered_lost_pets,], coords = c("easting", "northing"), crs = 27700)
+```
+
+```{r eval=FALSE}
+uncovered_lost_pets_map <- tm_shape(station_locations_3km_buffer_dissolve) + 
+  tm_polygons() + 
+  tm_shape(london_boundary) + tm_borders(col = "black", lwd = 2) +
+  tm_shape(uncovered_lost_pets_sf) + tm_symbols(scale = 0.5, col = "blue") +
+  tm_scale_bar(position = c(0,0)) +
+   tm_layout(title = "Area served by London Fire Brigade's stations",  
+            frame = FALSE, inner.margins = c(0.1,0.1,0.1,0.15))
+```
+
+```{r echo=FALSE}
+uncovered_lost_pets_map <- tm_shape(station_locations_3km_buffer_dissolve) + 
+  tm_polygons() + 
+  tm_shape(london_boundary) + tm_borders(col = "black", lwd = 2) +
+  tm_shape(uncovered_lost_pets_sf) + tm_symbols(scale = 0.5, col = "blue") +
+  tm_scale_bar(position = c(0,0)) +
+   tm_layout(title = "Area served by London Fire Brigade's stations",  
+            frame = FALSE, inner.margins = c(0.1,0.1,0.1,0.15))
+
+uncovered_lost_pets_map
+```
+
+We can also calculate the distance from each point to the area covered by fire stations.
+
+```{r}
+uncovered_lost_pets_sf$distance_to_station_m <- as.numeric(st_distance(uncovered_lost_pets_sf, station_locations_3km_buffer_dissolve))
+
+```
+
+```{r}
+distance_to_station <- mean(uncovered_lost_pets_sf$distance_to_station_m)
+```
+
+Mean distance to the fire station service area: 
+```{r echo=FALSE}
+distance_to_station
+```
+
+
+### Improving this analysis using Network Analysis
+
+The problem with all of the analysis we've completed so far is that is uses straight lines to calculate distances (Euclidean distance). In reality, a fire engine would be driving along a road network to get to an incident, so we should use that to calculate our distances. Barriers to travel networks, like motorways or rivers, can be very influential in differences between Euclidean distance and network distance. Luckily, we can calculate network distances with network analysis. 
+
+We're not going to dive into this in any detail during this exercise but we wanted to introduce the technique. Here's an example of our 3km buffer calculated using network analysis instead of a buffer.
+
+**insert network service area image**
+
+
+
+## Final Exercise
+You have now seen more examples of spatial data wrangling, geospatial operations and analysis techniques, and methods of mapping. By adding this knowledge to your existing experience using ```R``` and ```tidyverse``` packages you can now do a wide range of analysis. 
+
+For the remainder of the session try using the data provided to extend your analysis and produce a short report (R markdown perhaps?) or presentation illustrating your findings. You have all three datasets to utilise so think about how you can bring them together to answer some pertinent questions. Here are some ideas to get you started:
+
+*	Filtering incidents which are covered by two or more stations, also mapping them
+* Filter incidents which aren't covered by a fire station
+*	Cutting buffered service area out of London LA to map areas which aren't covered
+* assessing whether there's any link between the number of fire stations which cover an area and the number of animal related incidents
+* is there a link between cost of incidents and number of reported lost pets?
+
+Feel free to pair program or work individually - this is open time for you to cement and extend your skills in the best way for you.
+
+At the end of the session we will dedicate time to reviewing the work done by others so we can learn from each other. There will be instructors on hand to support you if needed - please just ask.
+
+
+## Reminders
+
+You can export your maps using ```tmap_save()```.
