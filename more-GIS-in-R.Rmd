@@ -629,8 +629,7 @@ The problem with all of the analysis we've completed so far is that is uses stra
 
 We're not going to dive into this in any detail during this exercise but we wanted to introduce the technique. Here's an example of our 3km buffer calculated using network analysis instead of a buffer.
 
-**insert network service area image**
-
+![An example of a network analysis service area from one of the fire stations.](images/FireStation_3km_ServiceArea.png) 
 
 
 ## Final Exercise
